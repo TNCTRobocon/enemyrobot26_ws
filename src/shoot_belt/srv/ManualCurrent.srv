@@ -1,0 +1,13 @@
+uint8 SET_FIXED_BUCKET=0
+uint8 INCREASE=1
+uint8 DECREASE=2
+uint8 SET_FIXED_BUCKET_1=3
+uint8 SET_FIXED_BUCKET_2=4
+uint8 SET_FIXED_BUCKET_3=5
+uint8 SET_MOVE=6
+
+uint8 operation
+---
+bool success
+float32 current_a
+string message

@@ -1,0 +1,189 @@
+# ベル直射出制御の設定ファイル
+
+shoot_belt_sequence:
+  ros__parameters:
+    # ===== 射出シーケンス・安全制限 =====
+
+    # 通常の射出シーケンスで使用する電流指令 [A]。
+    # min_shoot_current_a ～ max_shoot_current_a の範囲外ではシーケンスを受け付けない。
+    shoot_current_a: 25.0
+
+    # 射出シーケンスで許可する電流指令の下限 [A]。
+    min_shoot_current_a: 0.1
+
+    # 射出シーケンスで許可する電流指令の上限 [A]。
+    max_shoot_current_a: 40.0
+
+    # 加速開始位置からの移動距離がこの値 [mm] に達すると加速を終了する。
+    max_acceleration_distance_mm: 563.0
+
+    # 正常な射出シーケンス完了時に使用する位置目標の間隔 [mm]。
+    # ブレーキ完了後の現在位置以上となる最小の整数倍を目標位置にする。
+    # 例: 現在位置1125 mmなら1125 mm、1126 mmなら2250 mm。
+    # シーケンス完了時には原点をリセットせず、計算した位置を保持する。
+    origin_return_interval_mm: 1125.0
+
+    # ノード起動時に原点リセットを繰り返す最大時間 [秒]。
+    # 位置フィードバックが0 mm付近で安定したら再送を停止する。射出シーケンス中には使用しない。
+    origin_reset_timeout_sec: 15.0
+
+    # 起動時、位置が0 mm付近で確認できない場合の原点リセット再送間隔 [秒]。
+    origin_reset_retry_interval_sec: 0.1
+
+    # 異常・停止要求時に、ブレーキ指令と0 A指令を繰り返す時間 [秒]。
+    # 通常シーケンスのブレーキ終了条件には使用せず、速度フィードバックで停止判定する。
+    brake_wait_sec: 0.5
+
+    # 停止と判定するモーター速度の絶対値上限 [rad/s]。
+    # 実機の速度フィードバックのノイズ・分解能に応じて調整する。
+    brake_velocity_threshold_rad_s: 3.0
+
+    # 速度がしきい値以下で連続している必要時間 [秒]。
+    brake_velocity_stable_time_sec: 0.1
+
+    # ブレーキ開始から速度停止条件成立までの最大待機時間 [秒]。
+    # 超過時は異常終了し、原点復帰・原点リセットへ進まない。
+    brake_timeout_sec: 3.0
+
+    # 速度フィードバックが一度受信された後、更新がないと判定する時間 [秒]。
+    velocity_feedback_timeout_sec: 3.0
+
+    # シーケンス内で指令・状態確認を繰り返す基本周期 [ms]。
+    control_period_ms: 10
+
+    # 位置または制御モードのフィードバックが古いと判断する時間 [秒]。
+    # この時間を超えて更新がない場合、フィードバック異常として扱う。
+    feedback_timeout_sec: 3.0
+
+    # シーケンス開始時に、位置と制御モードの有効なフィードバックを待つ最大時間 [秒]。
+    startup_feedback_timeout_sec: 3.0
+
+    # 電流制御モード／ブレーキモード／位置制御モードへの切り替え確認を待つ最大時間 [秒]。
+    mode_confirmation_timeout_sec: 3.0
+
+    # 加速開始から最大移動距離に到達するまでの制限時間 [秒]。
+    # 時間内に到達しなければ異常終了し、開始位置への復帰は行わない。
+    acceleration_timeout_sec: 1.5
+
+    # 通常完了時、開始位置へ戻ったと判断する位置誤差の許容値 [mm]。
+    position_tolerance_mm: 5.0
+
+    # 位置誤差が position_tolerance_mm 以内に連続して収まる必要がある時間 [秒]。
+    # この時間を満たしたら通常完了とする。
+    position_stable_time_sec: 0.1
+
+    # 通常完了時に開始位置へ復帰する処理の最大時間 [秒]。
+    # タイムアウト時は異常として扱う。
+    position_return_timeout_sec: 5.0
+
+    # ===== シーケンスとCAN送受信ノード間のROS 2インターフェース =====
+
+    # シーケンスからCAN送信ノードへ送る順序付き指令トピック。
+    # 型: shoot_belt/msg/ShootBeltCommand
+    command_topic: /shoot_belt/can_tx_command
+
+    # CAN受信ノードから受け取る現在位置トピック [mm]。
+    # 符号付きの相対位置。STM32側も同じ単位・原点で送信すること。
+    feedback_position_topic: /shoot_belt/feedback/position
+
+    # CAN受信ノードから受け取る現在の制御モード。
+    # 0=current、1=velocity、2=position、3=brake。
+    feedback_mode_topic: /shoot_belt/feedback/control_mode
+
+    # CAN受信ノードから受け取るモーター速度 [rad/s]（CAN ID 0x210）。
+    feedback_velocity_topic: /shoot_belt/feedback/velocity
+
+    # CAN受信ノードが検出した不正なフィードバックを受け取るトピック。
+    feedback_fault_topic: /shoot_belt/feedback/fault
+
+    # 通常の停止要求トピック。受信するとブレーキへ切り替え、開始位置には復帰しない。
+    stop_topic: /shoot_belt/stop
+
+    # 非常停止状態を受け取るトピック (std_msgs/Bool)。
+    # true は停止処理、false は入力解除を表す。解除しても中断した動作は再開しない。
+    emergency_stop_topic: /shoot_belt/emergency_stop
+
+    # 射出シーケンスを実行するROS 2 Action名。
+    action_name: /shoot_belt/execute
+
+    # ===== 手動電流操作GUI用サービス =====
+
+    # 手動電流操作サービス名 (shoot_belt/srv/ManualCurrent)。
+    manual_current_service_name: /shoot_belt/manual_current
+
+    # GUIなどから明示的に原点初期化を要求するサービス名 (std_srvs/srv/Trigger)。
+    reset_origin_service_name: /shoot_belt/reset_origin
+
+    # 最後に受理された手動電流指令値 [A] を通知するトピック。
+    # モーターの実測電流値ではない。
+    manual_current_state_topic: /shoot_belt/manual_current_state
+
+    # 射出Actionの受付状態を通知するトピック (std_msgs/UInt8)。
+    # 0=ERROR、1=RUNNING、2=READY、3=CANCELLED、4=RESETTING、5=RESET_FAILED。100 ms周期で通知。
+    operation_state_topic: /shoot_belt/operation_state
+
+
+    manual_fixed_bucket_current_a: 15.0 # 使用しない
+
+    # GUIの「高」ボタンが設定する電流指令値 [A]（SET_FIXED_BUCKET_1）。
+    manual_bucket_1_current_a: 16.7
+
+    # GUIの「中」ボタンが設定する電流指令値 [A]（SET_FIXED_BUCKET_2）。
+    manual_bucket_2_current_a: 15.0
+
+    # GUIの「低」ボタンが設定する電流指令値 [A]（SET_FIXED_BUCKET_3）。
+    manual_bucket_3_current_a: 11.1
+
+    # GUIの「移動」ボタンが設定する電流指令値 [A]（SET_MOVE）。
+    # 初期値は「低」と同じ。用途に合わせて実機の許容範囲内で変更する。
+    manual_move_current_a: 25.0
+
+    # GUIのUP/DOWN操作1回あたりの電流変更量 [A]。
+    manual_current_step_a: 0.5
+
+    # 手動電流操作で許可する指令値の下限 [A]。
+    manual_min_current_a: 11.0
+
+    # 手動電流操作で許可する指令値の上限 [A]。
+    # max_shoot_current_a 以下で、実機の安全な範囲に設定する。
+    manual_max_current_a: 25.0
+
+shoot_belt_joy_test:
+  ros__parameters:
+    # joy_node が配信する Joy メッセージの購読先。
+    joy_topic: /joy
+
+    # Joy.buttons の0始まりのインデックス。0は1つ目のボタン。
+    button_index: 0
+
+    # Action送信前に確認する受付状態トピック。
+    # 0=ERROR、1=RUNNING、2=READY、3=CANCELLED、4=RESETTING、5=RESET_FAILED。
+    # 2=READYの場合だけテストActionのGoalを送信する。
+    operation_state_topic: /shoot_belt/operation_state
+
+shoot_belt_can_rx:
+  ros__parameters:
+    # ros2_socketcan が公開する受信CANフレームのトピック。
+    can_rx_topic: /can_rx
+
+    # CAN ID 0x220 の現在位置 [mm] を公開するトピック。
+    # データ本体は float32 little-endian。単位変換はこのノードでは行わない。
+    position_topic: /shoot_belt/feedback/position
+
+    # CAN ID 0x230 の制御モードフィードバックを公開するトピック。
+    mode_topic: /shoot_belt/feedback/control_mode
+
+    # CAN ID 0x210 のモーター速度 [rad/s] を公開するトピック。
+    # 現在の受信処理では4 byte float32 little-endianを想定する。
+    velocity_topic: /shoot_belt/feedback/velocity
+
+    # CANフレームの形式・値に問題があった場合に通知するトピック。
+    fault_topic: /shoot_belt/feedback/fault
+
+shoot_belt_can_tx:
+  ros__parameters:
+    # シーケンスノードから受け取る順序付き指令トピック。
+    command_topic: /shoot_belt/can_tx_command
+
+    # ros2_socketcan が送信CANフレームを受け取るトピック。
+    can_tx_topic: /can_tx

@@ -6,13 +6,13 @@ shoot_belt_sequence:
 
     # 通常の射出シーケンスで使用する電流指令 [A]。
     # min_shoot_current_a ～ max_shoot_current_a の範囲外ではシーケンスを受け付けない。
-    shoot_current_a: 25.0
+    shoot_current_a: 40.0
 
     # 射出シーケンスで許可する電流指令の下限 [A]。
     min_shoot_current_a: 0.1
 
     # 射出シーケンスで許可する電流指令の上限 [A]。
-    max_shoot_current_a: 40.0
+    max_shoot_current_a: 50.0
 
     # 加速開始位置からの移動距離がこの値 [mm] に達すると加速を終了する。
     max_acceleration_distance_mm: 563.0

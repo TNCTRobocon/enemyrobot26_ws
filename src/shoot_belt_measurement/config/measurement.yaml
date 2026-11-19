@@ -1,0 +1,16 @@
+shoot_belt_measurement_node:
+  ros__parameters:
+    action_name: /shoot_belt/execute
+    can_tx_topic: /can_tx
+    position_topic: /shoot_belt/feedback/position
+    velocity_topic: /shoot_belt/feedback/velocity
+    start_service_name: /shoot_belt_measurement/start
+    output_directory: "~/.ros/shoot_belt_measurement"
+
+    action_server_wait_timeout_sec: 10.0
+    initial_feedback_max_age_sec: 0.2
+    current_zero_epsilon_a: 0.001
+
+    # Detect movement relative to the position sampled at first non-zero current CAN.
+    position_change_threshold_mm: 1.0
+    position_change_confirmation_samples: 3

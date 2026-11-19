@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -16,14 +17,14 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
-#include "can_msgs/msg/frame.hpp"
+#include "can_socketcan_common/can_receiver.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include "rclcpp_action/rclcpp_action.hpp"
 #include "sequence_interfaces/action/sequence.hpp"
-#include "std_msgs/msg/float32.hpp"
 #include "std_srvs/srv/trigger.hpp"
 
 class ShootBeltMeasurement final : public rclcpp::Node
@@ -39,11 +40,11 @@ public:
   : Node("shoot_belt_measurement")
   {
     action_name_ = declare_parameter<std::string>("action_name", "/shoot_belt/execute");
-    can_tx_topic_ = declare_parameter<std::string>("can_tx_topic", "/can_tx");
-    position_topic_ = declare_parameter<std::string>(
-      "position_topic", "/shoot_belt/feedback/position");
-    velocity_topic_ = declare_parameter<std::string>(
-      "velocity_topic", "/shoot_belt/feedback/velocity");
+    can_interface_ = declare_parameter<std::string>("can_interface", "can0");
+    can_error_log_path_ = declare_parameter<std::string>(
+      "can_error_log_path", "/tmp/shoot_belt_measurement_can_rx_error.log");
+    can_error_log_interval_sec_ =
+      declare_parameter<double>("can_error_log_interval_sec", 1.0);
     start_service_name_ = declare_parameter<std::string>(
       "start_service_name", "/shoot_belt_measurement/start");
     output_directory_ = declare_parameter<std::string>(
@@ -61,17 +62,15 @@ public:
       declare_parameter<int>("position_change_confirmation_samples", 3);
 
     validateParameters();
-    action_client_ = rclcpp_action::create_client<Action>(this, action_name_);
 
-    can_tx_sub_ = create_subscription<can_msgs::msg::Frame>(
-      can_tx_topic_, rclcpp::QoS(200),
-      std::bind(&ShootBeltMeasurement::onCanTx, this, std::placeholders::_1));
-    position_sub_ = create_subscription<std_msgs::msg::Float32>(
-      position_topic_, rclcpp::QoS(200),
-      std::bind(&ShootBeltMeasurement::onPosition, this, std::placeholders::_1));
-    velocity_sub_ = create_subscription<std_msgs::msg::Float32>(
-      velocity_topic_, rclcpp::QoS(200),
-      std::bind(&ShootBeltMeasurement::onVelocity, this, std::placeholders::_1));
+    can_receiver_ = std::make_unique<can_socketcan_common::CanReceiver>(
+      can_interface_, can_error_log_path_, can_error_log_interval_sec_);
+    if (!can_receiver_->is_open()) {
+      throw std::runtime_error(
+        "Could not open SocketCAN receiver on interface " + can_interface_);
+    }
+
+    action_client_ = rclcpp_action::create_client<Action>(this, action_name_);
 
     start_service_ = create_service<std_srvs::srv::Trigger>(
       start_service_name_,
@@ -84,14 +83,26 @@ public:
       std::bind(&ShootBeltMeasurement::pollForActionServer, this));
     action_server_timer_->cancel();
 
+    can_receiver_running_.store(true);
+    can_receiver_thread_ = std::thread(
+      &ShootBeltMeasurement::canReceiveLoop, this);
+
     RCLCPP_INFO(
       get_logger(),
       "Measurement node ready. Call %s to send one /shoot_belt/execute Goal and record it.",
       start_service_name_.c_str());
     RCLCPP_INFO(
       get_logger(),
-      "Watching CAN TX=%s (current ID 0x100), position=%s, velocity=%s",
-      can_tx_topic_.c_str(), position_topic_.c_str(), velocity_topic_.c_str());
+      "Watching SocketCAN interface=%s (current ID 0x100, position ID 0x220, velocity ID 0x210)",
+      can_interface_.c_str());
+  }
+
+  ~ShootBeltMeasurement() override
+  {
+    can_receiver_running_.store(false);
+    if (can_receiver_thread_.joinable()) {
+      can_receiver_thread_.join();
+    }
   }
 
 private:
@@ -119,7 +130,6 @@ private:
   struct MeasurementSnapshot
   {
     bool have_current_can{false};
-    bool have_current_can_publish_stamp{false};
     bool have_position_change{false};
     bool have_position_confirmation{false};
     bool goal_accepted{false};
@@ -130,7 +140,6 @@ private:
     SystemClock::time_point action_start_system{};
     SteadyTime action_start{};
     SteadyTime current_can_time{};
-    SteadyTime current_can_receive_time{};
     SteadyTime position_change_first_time{};
     SteadyTime position_change_confirmation_time{};
 
@@ -138,7 +147,7 @@ private:
     double velocity_at_action_start_rad_s{0.0};
     double position_at_current_can_mm{0.0};
     double current_a{0.0};
-    double action_to_current_can_publish_ms{0.0};
+    double action_to_current_can_socketcan_receive_ms{0.0};
     double max_abs_velocity_rad_s{0.0};
     double max_abs_position_delta_from_action_start_mm{0.0};
 
@@ -203,11 +212,11 @@ private:
 
   void validateParameters() const
   {
-    if (action_name_.empty() || can_tx_topic_.empty() ||
-      position_topic_.empty() || velocity_topic_.empty() ||
-      start_service_name_.empty() || output_directory_.empty())
+    if (action_name_.empty() || can_interface_.empty() ||
+      can_error_log_path_.empty() || start_service_name_.empty() ||
+      output_directory_.empty())
     {
-      throw std::invalid_argument("Topic, action, service, and output paths must not be empty");
+      throw std::invalid_argument("Action, CAN interface, service, and output paths must not be empty");
     }
     if (!std::isfinite(action_server_wait_timeout_sec_) ||
       action_server_wait_timeout_sec_ <= 0.0 ||
@@ -216,6 +225,8 @@ private:
       !std::isfinite(current_zero_epsilon_a_) || current_zero_epsilon_a_ < 0.0 ||
       !std::isfinite(position_change_threshold_mm_) ||
       position_change_threshold_mm_ <= 0.0 ||
+      !std::isfinite(can_error_log_interval_sec_) ||
+      can_error_log_interval_sec_ < 0.0 ||
       position_change_confirmation_samples_ < 1)
     {
       throw std::invalid_argument("One or more measurement parameters are invalid");
@@ -318,8 +329,7 @@ private:
 
       rows_.clear();
       have_current_can_ = false;
-      have_current_can_publish_stamp_ = false;
-      action_to_current_can_publish_ms_ = 0.0;
+      action_to_current_can_socketcan_receive_ms_ = 0.0;
       have_position_change_ = false;
       have_position_confirmation_ = false;
       have_position_at_current_can_ = false;
@@ -414,7 +424,6 @@ private:
         std::lock_guard<std::mutex> lock(data_mutex_);
         action_start_ = SteadyClock::now();
         action_start_system_ = SystemClock::now();
-        action_start_ros_time_ns_ = get_clock()->now().nanoseconds();
         position_at_action_start_mm_ = latest_position_.value;
         have_velocity_at_action_start_ = latest_velocity_.valid;
         if (have_velocity_at_action_start_) {
@@ -431,63 +440,83 @@ private:
     }
   }
 
-  void onCanTx(const can_msgs::msg::Frame::SharedPtr frame)
+  void canReceiveLoop()
   {
-    if (frame->is_extended || frame->is_error || frame->is_rtr ||
-      frame->id != 0x100U || frame->dlc != 4U)
-    {
+    while (can_receiver_running_.load()) {
+      can_socketcan_common::ReceivedCanFrame frame;
+      const auto status = can_receiver_->receive(frame, 100);
+      if (status == can_socketcan_common::ReceiveStatus::Timeout) {
+        continue;
+      }
+      if (status == can_socketcan_common::ReceiveStatus::Error) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        continue;
+      }
+
+      if (frame.extended || frame.remote_request) {
+        continue;
+      }
+
+      if (frame.can_id != 0x100U && frame.can_id != 0x220U &&
+        frame.can_id != 0x210U)
+      {
+        continue;
+      }
+      if (frame.dlc != 4U) {
+        RCLCPP_WARN(
+          get_logger(), "Ignoring CAN ID 0x%03X with DLC=%u (expected 4)",
+          frame.can_id, static_cast<unsigned>(frame.dlc));
+        continue;
+      }
+
+      const float value = decodeFloat32LE(frame.data);
+      if (!std::isfinite(value)) {
+        RCLCPP_WARN(
+          get_logger(), "Ignoring non-finite float32 value on CAN ID 0x%03X",
+          frame.can_id);
+        continue;
+      }
+
+      // Timestamp immediately after the SocketCAN receive call returns.
+      // All three signals therefore use the same steady-clock domain.
+      const auto receive_time = SteadyClock::now();
+      if (frame.can_id == 0x100U) {
+        onCurrentCan(value, receive_time);
+      } else if (frame.can_id == 0x220U) {
+        onPosition(value, receive_time);
+      } else if (frame.can_id == 0x210U) {
+        onVelocity(value, receive_time);
+      }
+    }
+  }
+
+  void onCurrentCan(float current_a, const SteadyTime & receive_time)
+  {
+    if (std::abs(static_cast<double>(current_a)) <= current_zero_epsilon_a_) {
       return;
     }
 
-    const float current_a = decodeFloat32LE(frame->data);
-    if (!std::isfinite(current_a) ||
-      std::abs(static_cast<double>(current_a)) <= current_zero_epsilon_a_)
-    {
-      return;
-    }
-
-    const auto receive_time = SteadyClock::now();
-    const auto frame_stamp_ns = rclcpp::Time(frame->header.stamp).nanoseconds();
-    const auto ros_receive_time_ns = get_clock()->now().nanoseconds();
     std::lock_guard<std::mutex> lock(data_mutex_);
     if (!measurement_active_ || have_current_can_) {
       return;
     }
 
     have_current_can_ = true;
-    current_can_receive_time_ = receive_time;
     current_can_time_ = receive_time;
     current_can_a_ = static_cast<double>(current_a);
+    action_to_current_can_socketcan_receive_ms_ =
+      elapsedMilliseconds(action_start_, receive_time);
 
-    // The CAN TX node stamps the frame immediately before publishing it.
-    // Use that timestamp for Action-to-CAN latency when both nodes share ROS time.
-    if (frame_stamp_ns > 0 && action_start_ros_time_ns_ > 0) {
-      const auto publish_delta_ns = frame_stamp_ns - action_start_ros_time_ns_;
-      if (publish_delta_ns >= 0 && publish_delta_ns <= 60000000000LL) {
-        have_current_can_publish_stamp_ = true;
-        action_to_current_can_publish_ms_ =
-          static_cast<double>(publish_delta_ns) / 1.0e6;
-      }
-
-      // Map the frame's ROS timestamp into this node's steady-clock domain.
-      // If the clocks are not comparable, retain the local receive timestamp.
-      const auto transport_age_ns = ros_receive_time_ns - frame_stamp_ns;
-      if (transport_age_ns >= 0 && transport_age_ns <= 2000000000LL) {
-        current_can_time_ = receive_time - std::chrono::nanoseconds(transport_age_ns);
-      }
-    }
-
-    // Select the most recent position sample received no later than the CAN
-    // publisher timestamp. A position callback may be dispatched before the CAN
-    // callback even when its sample was published after the CAN frame.
+    // The same SocketCAN receive thread processes position and current frames.
+    // Select the latest position sample observed no later than this current frame.
     const auto baseline = std::find_if(
       position_history_.rbegin(), position_history_.rend(),
-      [this](const TimedValue & sample) {
-        return sample.time <= current_can_time_;
+      [&receive_time](const TimedValue & sample) {
+        return sample.time <= receive_time;
       });
     if (baseline != position_history_.rend()) {
       const double baseline_age_sec = std::chrono::duration<double>(
-        current_can_time_ - baseline->time).count();
+        receive_time - baseline->time).count();
       if (baseline_age_sec <= initial_feedback_max_age_sec_) {
         have_position_at_current_can_ = true;
         position_at_current_can_mm_ = static_cast<double>(baseline->value);
@@ -496,22 +525,16 @@ private:
 
     RCLCPP_INFO(
       get_logger(),
-      "First non-zero current CAN detected: %.4f A, action-to-CAN=%.3f ms",
-      current_can_a_, elapsedMilliseconds(action_start_, current_can_time_));
+      "First non-zero current CAN received: %.4f A, action-to-SocketCAN-RX=%.3f ms",
+      current_can_a_,
+      action_to_current_can_socketcan_receive_ms_);
   }
 
-  void onPosition(const std_msgs::msg::Float32::SharedPtr message)
+  void onPosition(float position_mm, const SteadyTime & now)
   {
-    if (!std::isfinite(message->data)) {
-      RCLCPP_WARN_THROTTLE(
-        get_logger(), *get_clock(), 2000, "Ignoring non-finite position feedback");
-      return;
-    }
-
-    const auto now = SteadyClock::now();
     std::lock_guard<std::mutex> lock(data_mutex_);
     latest_position_.valid = true;
-    latest_position_.value = message->data;
+    latest_position_.value = position_mm;
     latest_position_.time = now;
     position_history_.push_back(latest_position_);
     while (position_history_.size() > 1000U) {
@@ -529,7 +552,7 @@ private:
 
     appendSeriesRowLocked(now, "position");
     const double action_displacement = std::abs(
-      static_cast<double>(message->data) - position_at_action_start_mm_);
+      static_cast<double>(position_mm) - position_at_action_start_mm_);
     max_abs_position_delta_from_action_start_mm_ = std::max(
       max_abs_position_delta_from_action_start_mm_, action_displacement);
 
@@ -540,7 +563,7 @@ private:
     }
 
     const double current_can_displacement = std::abs(
-      static_cast<double>(message->data) - position_at_current_can_mm_);
+      static_cast<double>(position_mm) - position_at_current_can_mm_);
 
     if (current_can_displacement >= position_change_threshold_mm_) {
       if (consecutive_position_change_samples_ == 0) {
@@ -567,18 +590,11 @@ private:
     }
   }
 
-  void onVelocity(const std_msgs::msg::Float32::SharedPtr message)
+  void onVelocity(float velocity_rad_s, const SteadyTime & now)
   {
-    if (!std::isfinite(message->data)) {
-      RCLCPP_WARN_THROTTLE(
-        get_logger(), *get_clock(), 2000, "Ignoring non-finite velocity feedback");
-      return;
-    }
-
-    const auto now = SteadyClock::now();
     std::lock_guard<std::mutex> lock(data_mutex_);
     latest_velocity_.valid = true;
-    latest_velocity_.value = message->data;
+    latest_velocity_.value = velocity_rad_s;
     latest_velocity_.time = now;
 
     if (!measurement_active_) {
@@ -586,7 +602,7 @@ private:
     }
 
     max_abs_velocity_rad_s_ = std::max(
-      max_abs_velocity_rad_s_, std::abs(static_cast<double>(message->data)));
+      max_abs_velocity_rad_s_, std::abs(static_cast<double>(velocity_rad_s)));
     appendSeriesRowLocked(now, "velocity");
   }
 
@@ -627,7 +643,6 @@ private:
       action_result_reason_ = reason;
 
       snapshot.have_current_can = have_current_can_;
-      snapshot.have_current_can_publish_stamp = have_current_can_publish_stamp_;
       snapshot.have_position_change = have_position_change_;
       snapshot.have_position_confirmation = have_position_confirmation_;
       snapshot.goal_accepted = goal_accepted_;
@@ -637,14 +652,14 @@ private:
       snapshot.action_start_system = action_start_system_;
       snapshot.action_start = action_start_;
       snapshot.current_can_time = current_can_time_;
-      snapshot.current_can_receive_time = current_can_receive_time_;
       snapshot.position_change_first_time = position_change_first_time_;
       snapshot.position_change_confirmation_time = position_change_confirmation_time_;
       snapshot.position_at_action_start_mm = position_at_action_start_mm_;
       snapshot.velocity_at_action_start_rad_s = velocity_at_action_start_rad_s_;
       snapshot.position_at_current_can_mm = position_at_current_can_mm_;
       snapshot.current_a = current_can_a_;
-      snapshot.action_to_current_can_publish_ms = action_to_current_can_publish_ms_;
+      snapshot.action_to_current_can_socketcan_receive_ms =
+        action_to_current_can_socketcan_receive_ms_;
       snapshot.max_abs_velocity_rad_s = max_abs_velocity_rad_s_;
       snapshot.max_abs_position_delta_from_action_start_mm =
         max_abs_position_delta_from_action_start_mm_;
@@ -708,7 +723,7 @@ private:
 
       summary << "action_start_local_time,goal_accepted,action_result_code,action_result_reason,"
               << "initial_position_mm,initial_velocity_rad_s,current_can_a,"
-              << "action_to_current_can_publish_ms,action_to_current_can_receive_ms,"
+              << "action_to_current_can_socketcan_receive_ms,"
               << "position_at_current_can_mm,position_change_threshold_mm,"
               << "action_to_position_change_ms,current_can_to_position_change_ms,"
               << "current_can_to_position_confirmation_ms,max_abs_velocity_rad_s,"
@@ -726,11 +741,8 @@ private:
       summary << ',';
       writeOptional(summary, snapshot.have_current_can, snapshot.current_a);
       summary << ',';
-      writeOptional(summary, snapshot.have_current_can_publish_stamp,
-        snapshot.action_to_current_can_publish_ms);
-      summary << ',';
       writeOptional(summary, snapshot.have_current_can,
-        elapsedMilliseconds(snapshot.action_start, snapshot.current_can_receive_time));
+        snapshot.action_to_current_can_socketcan_receive_ms);
       summary << ',';
       writeOptional(summary, snapshot.have_position_at_current_can,
         snapshot.position_at_current_can_mm);
@@ -797,11 +809,11 @@ private:
   }
 
   std::string action_name_;
-  std::string can_tx_topic_;
-  std::string position_topic_;
-  std::string velocity_topic_;
+  std::string can_interface_;
+  std::string can_error_log_path_;
   std::string start_service_name_;
   std::string output_directory_;
+  double can_error_log_interval_sec_{1.0};
 
   double action_server_wait_timeout_sec_{10.0};
   double initial_feedback_max_age_sec_{0.2};
@@ -810,9 +822,9 @@ private:
   int position_change_confirmation_samples_{3};
 
   rclcpp_action::Client<Action>::SharedPtr action_client_;
-  rclcpp::Subscription<can_msgs::msg::Frame>::SharedPtr can_tx_sub_;
-  rclcpp::Subscription<std_msgs::msg::Float32>::SharedPtr position_sub_;
-  rclcpp::Subscription<std_msgs::msg::Float32>::SharedPtr velocity_sub_;
+  std::unique_ptr<can_socketcan_common::CanReceiver> can_receiver_;
+  std::atomic<bool> can_receiver_running_{false};
+  std::thread can_receiver_thread_;
   rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr start_service_;
   rclcpp::TimerBase::SharedPtr action_server_timer_;
 
@@ -823,7 +835,6 @@ private:
   bool have_position_at_action_start_{false};
   bool have_velocity_at_action_start_{false};
   bool have_current_can_{false};
-  bool have_current_can_publish_stamp_{false};
   bool have_position_at_current_can_{false};
   bool have_position_change_{false};
   bool have_position_confirmation_{false};
@@ -832,7 +843,6 @@ private:
   SteadyTime action_start_{};
   SystemClock::time_point action_start_system_{};
   SteadyTime current_can_time_{};
-  SteadyTime current_can_receive_time_{};
   SteadyTime position_change_first_time_{};
   SteadyTime position_change_confirmation_time_{};
 
@@ -843,8 +853,7 @@ private:
   double velocity_at_action_start_rad_s_{0.0};
   double position_at_current_can_mm_{0.0};
   double current_can_a_{0.0};
-  int64_t action_start_ros_time_ns_{0};
-  double action_to_current_can_publish_ms_{0.0};
+  double action_to_current_can_socketcan_receive_ms_{0.0};
   int consecutive_position_change_samples_{0};
   double max_abs_velocity_rad_s_{0.0};
   double max_abs_position_delta_from_action_start_mm_{0.0};

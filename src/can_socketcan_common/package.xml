@@ -1,0 +1,8 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>can_socketcan_common</name><version>0.1.0</version>
+  <description>Classic Linux SocketCAN sender and receiver library.</description>
+  <maintainer email="roboa@example.com">roboa</maintainer><license>MIT</license>
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <export><build_type>ament_cmake</build_type></export>
+</package>

@@ -1,9 +1,11 @@
 shoot_belt_measurement_node:
   ros__parameters:
     action_name: /shoot_belt/execute
-    can_tx_topic: /can_tx
-    position_topic: /shoot_belt/feedback/position
-    velocity_topic: /shoot_belt/feedback/velocity
+
+    # Linux SocketCAN interface used for direct measurement reception.
+    can_interface: can0
+    can_error_log_path: /tmp/shoot_belt_measurement_can_rx_error.log
+    can_error_log_interval_sec: 1.0
     start_service_name: /shoot_belt_measurement/start
     output_directory: "~/.ros/shoot_belt_measurement"
 

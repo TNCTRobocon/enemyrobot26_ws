@@ -11,10 +11,10 @@ endif()
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rclcpp_action REQUIRED)
-find_package(can_msgs REQUIRED)
 find_package(sequence_interfaces REQUIRED)
-find_package(std_msgs REQUIRED)
 find_package(std_srvs REQUIRED)
+find_package(can_socketcan_common REQUIRED)
+find_package(Threads REQUIRED)
 
 add_executable(shoot_belt_measurement_node
   src/shoot_belt_measurement.cpp
@@ -22,10 +22,12 @@ add_executable(shoot_belt_measurement_node
 ament_target_dependencies(shoot_belt_measurement_node
   rclcpp
   rclcpp_action
-  can_msgs
   sequence_interfaces
-  std_msgs
   std_srvs
+  can_socketcan_common
+)
+target_link_libraries(shoot_belt_measurement_node
+  Threads::Threads
 )
 
 install(TARGETS

@@ -146,7 +146,7 @@ shoot_belt_sequence:
 
     # 手動電流操作で許可する指令値の上限 [A]。
     # max_shoot_current_a 以下で、実機の安全な範囲に設定する。
-    manual_max_current_a: 25.0
+    manual_max_current_a: 40.0
 
 shoot_belt_joy_test:
   ros__parameters:
